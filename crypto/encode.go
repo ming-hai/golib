@@ -24,9 +24,7 @@ import (
 	"golang.org/x/crypto/pbkdf2"
 )
 
-var (
-	DefaultSalt = "crypto"
-)
+var DefaultSalt = "crypto"
 
 // NewWriter returns a new Writer that encrypts bytes to w.
 func NewWriter(w io.Writer, key []byte) (*Writer, error) {
@@ -86,4 +84,24 @@ func (w *Writer) Write(p []byte) (nRet int, errRet error) {
 		w.err = errRet
 	}
 	return
+}
+
+func Encode(s, key []byte) ([]byte, error) {
+	key = pbkdf2.Key(key, []byte(DefaultSalt), 64, aes.BlockSize, sha1.New)
+
+	block, err := aes.NewCipher(key)
+	if err != nil {
+		return nil, err
+	}
+
+	ciphertext := make([]byte, aes.BlockSize+len(s))
+	// random iv
+	iv := ciphertext[:aes.BlockSize]
+	if _, err := io.ReadFull(rand.Reader, iv); err != nil {
+		return nil, err
+	}
+
+	stream := cipher.NewCFBEncrypter(block, iv)
+	stream.XORKeyStream(ciphertext[aes.BlockSize:], s)
+	return ciphertext, nil
 }

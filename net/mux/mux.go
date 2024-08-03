@@ -39,6 +39,7 @@ type Mux struct {
 	// sorted by priority
 	lns             []*listener
 	maxNeedBytesNum uint32
+	keepAlive       time.Duration
 
 	mu sync.RWMutex
 }
@@ -49,6 +50,10 @@ func NewMux(ln net.Listener) (mux *Mux) {
 		lns: make([]*listener, 0),
 	}
 	return
+}
+
+func (mux *Mux) SetKeepAlive(keepAlive time.Duration) {
+	mux.keepAlive = keepAlive
 }
 
 // priority
@@ -78,12 +83,12 @@ func (mux *Mux) Listen(priority int, needBytesNum uint32, fn MatchFunc) net.List
 	return ln
 }
 
-func (mux *Mux) ListenHttp(priority int) net.Listener {
-	return mux.Listen(priority, HttpNeedBytesNum, HttpMatchFunc)
+func (mux *Mux) ListenHTTP(priority int) net.Listener {
+	return mux.Listen(priority, HTTPNeedBytesNum, HTTPMatchFunc)
 }
 
-func (mux *Mux) ListenHttps(priority int) net.Listener {
-	return mux.Listen(priority, HttpsNeedBytesNum, HttpsMatchFunc)
+func (mux *Mux) ListenHTTPS(priority int) net.Listener {
+	return mux.Listen(priority, HTTPSNeedBytesNum, HTTPSMatchFunc)
 }
 
 func (mux *Mux) DefaultListener() net.Listener {
@@ -117,9 +122,7 @@ func (mux *Mux) release(ln *listener) bool {
 
 func (mux *Mux) copyLns() []*listener {
 	lns := make([]*listener, 0, len(mux.lns))
-	for _, l := range mux.lns {
-		lns = append(lns, l)
-	}
+	lns = append(lns, mux.lns...)
 	return lns
 }
 
@@ -150,6 +153,7 @@ func (mux *Mux) Serve() error {
 		if err != nil {
 			return err
 		}
+		tempDelay = 0
 
 		go mux.handleConn(conn)
 	}
@@ -162,16 +166,26 @@ func (mux *Mux) handleConn(conn net.Conn) {
 	defaultLn := mux.defaultLn
 	mux.mu.RUnlock()
 
+	if mux.keepAlive != 0 {
+		if tcpConn, ok := conn.(*net.TCPConn); ok {
+			if mux.keepAlive > 0 {
+				_ = tcpConn.SetKeepAlivePeriod(mux.keepAlive)
+			} else {
+				_ = tcpConn.SetKeepAlive(false)
+			}
+		}
+	}
+
 	sharedConn, rd := gnet.NewSharedConnSize(conn, int(maxNeedBytesNum))
 	data := make([]byte, maxNeedBytesNum)
 
-	conn.SetReadDeadline(time.Now().Add(DefaultTimeout))
+	_ = conn.SetReadDeadline(time.Now().Add(DefaultTimeout))
 	_, err := io.ReadFull(rd, data)
 	if err != nil {
 		conn.Close()
 		return
 	}
-	conn.SetReadDeadline(time.Time{})
+	_ = conn.SetReadDeadline(time.Time{})
 
 	for _, ln := range lns {
 		if match := ln.matchFn(data); match {
@@ -198,7 +212,6 @@ func (mux *Mux) handleConn(conn net.Conn) {
 
 	// No listeners for this connection, close it.
 	conn.Close()
-	return
 }
 
 type listener struct {
@@ -208,8 +221,7 @@ type listener struct {
 	needBytesNum uint32
 	matchFn      MatchFunc
 
-	c  chan net.Conn
-	mu sync.RWMutex
+	c chan net.Conn
 }
 
 // Accept waits for and returns the next connection to the listener.
